@@ -1,26 +1,47 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { Nav } from "@/components/landing/Nav";
+import { Hero } from "@/components/landing/Hero";
+import { Problem } from "@/components/landing/Problem";
+import { Lifecycle } from "@/components/landing/Lifecycle";
+import { Privacy } from "@/components/landing/Privacy";
+import { UseCases } from "@/components/landing/UseCases";
+import { Modes } from "@/components/landing/Modes";
+import { DashboardPreview } from "@/components/landing/DashboardPreview";
+import { FinalCTA } from "@/components/landing/FinalCTA";
+import { ScrollyVideo } from "@/components/landing/ScrollyVideo";
+import { WalletAssist } from "@/components/landing/WalletAssist";
+import { Footer } from "@/components/landing/Footer";
+import { Noise } from "@/components/fx/Noise";
+
 
 export const Route = createFileRoute("/")({
+  head: () => ({
+    meta: [
+      { title: "PayMemo - Add meaning before you sign" },
+      { name: "description", content: "PayMemo turns raw wallet transactions into private, verified payment records for payroll, invoices, swaps, bridges, and business accounting." },
+      { property: "og:title", content: "PayMemo - Add meaning before you sign" },
+      { property: "og:description", content: "Private transaction memory and onchain accounting for stablecoin payments." },
+    ],
+  }),
   component: Index,
 });
 
-// IMPORTANT: Replace this placeholder. For sites with multiple pages (About, Services, Contact, etc.),
-// create separate route files (about.tsx, services.tsx, contact.tsx) — don't put all pages in this file.
-function PlaceholderIndex() {
-  return (
-    <div
-      className="flex min-h-screen items-center justify-center"
-      style={{ backgroundColor: "#fcfbf8" }}
-    >
-      <img
-        data-lovable-blank-page-placeholder="REMOVE_THIS"
-        src="https://cdn.gpteng.co/blank-app-v1.svg"
-        alt="Your app will live here!"
-      />
-    </div>
-  );
-}
-
 function Index() {
-  return <PlaceholderIndex />;
+  return (
+    <main className="relative min-h-screen overflow-x-clip bg-background text-foreground">
+      <Noise />
+      <Nav />
+      <Hero />
+      <WalletAssist />
+      <ScrollyVideo />
+      <Problem />
+      <Lifecycle />
+      <Modes />
+      <Privacy />
+      <UseCases />
+      <DashboardPreview />
+      <FinalCTA />
+      <Footer />
+    </main>
+  );
 }
