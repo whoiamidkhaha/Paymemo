@@ -20,6 +20,7 @@ import {
 import { useEffect, useState } from "react";
 import { Logo } from "@/components/brand/Logo";
 import { readVaultSession } from "@/lib/crypto-vault";
+import { useExtensionRecords } from "@/lib/extension-records";
 
 type NavItem = { to: string; label: string; icon: LucideIcon; exact?: boolean };
 
@@ -41,8 +42,9 @@ const moreItems: NavItem[] = [
   { to: "/app/docs", label: "Docs", icon: BookOpen },
 ];
 
-function renderItem(it: NavItem, active: boolean) {
+function renderItem(it: NavItem, active: boolean, pendingCount: number) {
   const Icon = it.icon;
+  const showAttention = it.to === "/app/review" && pendingCount > 0;
   return (
     <Link
       key={it.to}
@@ -54,10 +56,22 @@ function renderItem(it: NavItem, active: boolean) {
       <Icon className="h-4 w-4" />
       <span className="flex min-w-0 flex-1 items-center gap-2">
         {it.label}
-        {it.to === "/app/review" && (
-          <span className="relative flex h-2.5 w-2.5" aria-label="Needs review attention">
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-red-900 opacity-70" />
-            <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-red-900" />
+        {showAttention && (
+          <span
+            className="relative ml-auto flex items-center gap-1"
+            aria-label={`${pendingCount} pending review${pendingCount === 1 ? "" : "s"}`}
+          >
+            <span className="relative flex h-2.5 w-2.5">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-red-900 opacity-70" />
+              <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-red-900" />
+            </span>
+            <span
+              className={`rounded-full px-1.5 text-[10px] font-bold ${
+                active ? "bg-cream/20 text-cream" : "bg-red-900/10 text-red-900"
+              }`}
+            >
+              {pendingCount > 99 ? "99+" : pendingCount}
+            </span>
           </span>
         )}
       </span>
@@ -70,6 +84,12 @@ export function AppSidebar() {
   const [vaultUnlocked, setVaultUnlocked] = useState(false);
   const moreActive = moreItems.some((item) => path.startsWith(item.to));
   const [moreOpen, setMoreOpen] = useState(moreActive);
+
+  // Live pending count drives the Needs Review attention dot.
+  const extensionQuery = useExtensionRecords();
+  const pendingCount = (extensionQuery.data ?? []).filter(
+    (record) => record.status !== "confirmed",
+  ).length;
 
   useEffect(() => {
     const refresh = () => setVaultUnlocked(Boolean(readVaultSession()));
@@ -95,7 +115,7 @@ export function AppSidebar() {
       <nav className="mt-6 space-y-1">
         {primaryItems.map((it) => {
           const active = it.exact ? path === it.to : path.startsWith(it.to);
-          return renderItem(it, active);
+          return renderItem(it, active, pendingCount);
         })}
 
         <button
@@ -116,7 +136,7 @@ export function AppSidebar() {
           <div className="ml-3 space-y-1 border-l border-ink/15 pl-2">
             {moreItems.map((it) => {
               const active = it.exact ? path === it.to : path.startsWith(it.to);
-              return renderItem(it, active);
+              return renderItem(it, active, pendingCount);
             })}
           </div>
         )}

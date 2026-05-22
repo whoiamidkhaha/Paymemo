@@ -14,6 +14,8 @@ import {
   listWatchedWalletsByOwner,
   updateWatchedWalletScanProgress,
   addExtensionRecord,
+  listKnownVaultTxHashes,
+  listKnownExtensionTxHashes,
   type WatchedWallet,
 } from "./paymemo-db";
 import { morphHoodi, morphTokens, formatUnits } from "@/lib/morph";
@@ -225,7 +227,11 @@ type ScanResult = {
   detections: number;
 };
 
-async function scanOne(watched: WatchedWallet, latestBlock: number): Promise<ScanResult> {
+async function scanOne(
+  watched: WatchedWallet,
+  latestBlock: number,
+  knownTxHashes: Set<string>,
+): Promise<ScanResult> {
   const previous = watched.lastScannedBlock || Math.max(0, latestBlock - INITIAL_LOOKBACK);
   const fromBlock = Math.max(0, Math.min(previous + 1, latestBlock));
   const toBlock = latestBlock;
@@ -252,7 +258,13 @@ async function scanOne(watched: WatchedWallet, latestBlock: number): Promise<Sca
   for (const block of blocks) {
     for (const tx of block.transactions ?? []) {
       if (!tx.hash) continue;
-      const key = `native:${tx.hash.toLowerCase()}`;
+      const hashLower = tx.hash.toLowerCase();
+      // Skip transactions the user has already memo'd via /app/send or via
+      // the Review-confirm flow — they live in vault_records or are already
+      // recorded in extension_records, so re-inserting would create
+      // duplicates and bounce them back into Needs Review.
+      if (knownTxHashes.has(hashLower)) continue;
+      const key = `native:${hashLower}`;
       if (seenKeys.has(key)) continue;
       const draft = buildNativeRecord(tx, watched.watchedAddress, ownerLabel);
       if (!draft) continue;
@@ -260,6 +272,7 @@ async function scanOne(watched: WatchedWallet, latestBlock: number): Promise<Sca
       try {
         const normalized = normalizeRecord(draft);
         await addExtensionRecord(normalized);
+        knownTxHashes.add(hashLower);
         detections += 1;
       } catch {
         // Skip a single bad record; keep scanning.
@@ -269,7 +282,9 @@ async function scanOne(watched: WatchedWallet, latestBlock: number): Promise<Sca
 
   for (const log of logs) {
     if (!log.transactionHash) continue;
-    const key = `erc20:${log.transactionHash.toLowerCase()}:${log.address.toLowerCase()}`;
+    const hashLower = log.transactionHash.toLowerCase();
+    if (knownTxHashes.has(hashLower)) continue;
+    const key = `erc20:${hashLower}:${log.address.toLowerCase()}`;
     if (seenKeys.has(key)) continue;
     const draft = buildErc20Record(log, watched.watchedAddress, ownerLabel);
     if (!draft) continue;
@@ -277,6 +292,7 @@ async function scanOne(watched: WatchedWallet, latestBlock: number): Promise<Sca
     try {
       const normalized = normalizeRecord(draft);
       await addExtensionRecord(normalized);
+      knownTxHashes.add(hashLower);
       detections += 1;
     } catch {
       // skip
@@ -292,9 +308,18 @@ export async function scanAllEnabled() {
   if (!wallets.length)
     return { ok: true, walletsScanned: 0, detections: 0, results: [] as ScanResult[] };
   const latestBlock = hexToNumber(await morphRpc<Hex>("eth_blockNumber"));
+  // Pre-fetch every tx hash already memo'd or recorded so the scan dedupes
+  // them in a single in-memory Set instead of querying per-wallet.
+  const owners = Array.from(new Set(wallets.map((wallet) => wallet.ownerWallet)));
+  const [vaultHashes, extensionHashes] = await Promise.all([
+    listKnownVaultTxHashes(owners),
+    listKnownExtensionTxHashes(),
+  ]);
+  const knownTxHashes = new Set<string>([...vaultHashes, ...extensionHashes]);
+
   const results: ScanResult[] = [];
   for (const wallet of wallets) {
-    const result = await scanOne(wallet, latestBlock).catch((error) => {
+    const result = await scanOne(wallet, latestBlock, knownTxHashes).catch((error) => {
       console.warn("[paymemo] server scan failed for", wallet.watchedAddress, error);
       return {
         watched: wallet.watchedAddress,
@@ -314,9 +339,15 @@ export async function scanForOwner(ownerWallet: string) {
   if (!wallets.length)
     return { ok: true, walletsScanned: 0, detections: 0, results: [] as ScanResult[] };
   const latestBlock = hexToNumber(await morphRpc<Hex>("eth_blockNumber"));
+  const [vaultHashes, extensionHashes] = await Promise.all([
+    listKnownVaultTxHashes([ownerWallet]),
+    listKnownExtensionTxHashes(),
+  ]);
+  const knownTxHashes = new Set<string>([...vaultHashes, ...extensionHashes]);
+
   const results: ScanResult[] = [];
   for (const wallet of wallets) {
-    const result = await scanOne(wallet, latestBlock).catch((error) => {
+    const result = await scanOne(wallet, latestBlock, knownTxHashes).catch((error) => {
       console.warn("[paymemo] owner scan failed for", wallet.watchedAddress, error);
       return {
         watched: wallet.watchedAddress,

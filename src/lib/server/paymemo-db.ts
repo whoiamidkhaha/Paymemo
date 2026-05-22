@@ -300,6 +300,57 @@ export async function listVaultRecords(walletAddress: string) {
   return db.vaultRecords.filter((record) => record.walletAddress.toLowerCase() === walletKey);
 }
 
+/**
+ * Returns the set of tx hashes that are already memo'd in the vault for any
+ * of the given owner wallets. The server-side Morph scanner uses this to
+ * skip transactions the user has already explained via /app/send or via
+ * the Review-confirm flow — they shouldn't bounce back into Needs Review.
+ */
+export async function listKnownVaultTxHashes(walletAddresses: string[]) {
+  const wallets = walletAddresses.map((wallet) => wallet.toLowerCase());
+  if (!wallets.length) return new Set<string>();
+
+  const hashes = new Set<string>();
+
+  if (isSupabaseEnabled()) {
+    const filter = wallets.map((wallet) => `"${wallet}"`).join(",");
+    const rows = await supabaseRequest<VaultRecordRow[]>(
+      `vault_records?wallet_address=in.(${encodeURIComponent(filter)})&select=public_record`,
+    ).catch(() => [] as VaultRecordRow[]);
+    for (const row of rows) {
+      const tx = (row.public_record as { txHash?: string } | null)?.txHash;
+      if (tx) hashes.add(tx.toLowerCase());
+    }
+    return hashes;
+  }
+
+  const db = await readPayMemoDb();
+  for (const record of db.vaultRecords) {
+    if (!wallets.includes(record.walletAddress.toLowerCase())) continue;
+    const tx = (record.publicRecord as { txHash?: string })?.txHash;
+    if (tx) hashes.add(tx.toLowerCase());
+  }
+  return hashes;
+}
+
+export async function listKnownExtensionTxHashes() {
+  if (isSupabaseEnabled()) {
+    const rows = await supabaseRequest<{ record: { txHash?: string } }[]>(
+      `extension_records?select=record`,
+    ).catch(() => [] as { record: { txHash?: string } }[]);
+    const hashes = new Set<string>();
+    for (const row of rows) {
+      const tx = row.record?.txHash;
+      if (tx) hashes.add(tx.toLowerCase());
+    }
+    return hashes;
+  }
+  const db = await readPayMemoDb();
+  return new Set(
+    db.extensionRecords.map((record) => String(record.txHash || "").toLowerCase()).filter(Boolean),
+  );
+}
+
 export async function deleteVaultRecords(walletAddress: string) {
   const walletKey = walletAddress.toLowerCase();
 

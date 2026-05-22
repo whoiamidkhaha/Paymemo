@@ -5,11 +5,14 @@ import { useEffect, useMemo, useState } from "react";
 import { useExtensionRecords } from "@/lib/extension-records";
 import { notify } from "@/lib/notify";
 import {
+  decryptPrivateMetadata,
   encryptPrivateMetadata,
   getRememberedVaultKey,
   readVaultSession,
 } from "@/lib/crypto-vault";
 import {
+  fetchEncryptedVaultRecords,
+  readEncryptedVaultRecords,
   saveEncryptedVaultRecord,
   syncEncryptedVaultRecord,
   toPrivateMetadata,
@@ -35,8 +38,13 @@ function ReviewQueue() {
     [extensionQuery.data],
   );
 
+  const [activeTab, setActiveTab] = useState<"pending" | "completed">("pending");
   const [ownerWallet, setOwnerWallet] = useState<string>("");
   const [partnerWallets, setPartnerWallets] = useState<PartnerWallet[]>([]);
+  const [completedRecords, setCompletedRecords] = useState<ReviewItem[]>([]);
+  const [completedStatus, setCompletedStatus] = useState<
+    "idle" | "loading" | "loaded" | "locked" | "error"
+  >("idle");
 
   useEffect(() => {
     const session = readVaultSession();
@@ -44,6 +52,55 @@ function ReviewQueue() {
     setOwnerWallet(owner);
     setPartnerWallets(readPartnerWallets(owner || undefined));
   }, []);
+
+  async function loadCompletedRecords() {
+    const session = readVaultSession();
+    if (!session?.walletAddress) {
+      setCompletedRecords([]);
+      setCompletedStatus("locked");
+      return;
+    }
+    setCompletedStatus("loading");
+    try {
+      const key = await getRememberedVaultKey();
+      const records = await fetchEncryptedVaultRecords(session.walletAddress).catch(() =>
+        readEncryptedVaultRecords(),
+      );
+      const onlyConfirmed = records.filter((record) => record.publicRecord.status === "confirmed");
+
+      if (!key) {
+        const lockedItems = onlyConfirmed.map((record, index) =>
+          vaultRecordToReviewItem(record, {}, index),
+        );
+        setCompletedRecords(lockedItems);
+        setCompletedStatus("locked");
+        return;
+      }
+
+      const decrypted = await Promise.all(
+        onlyConfirmed.map(async (record, index) => {
+          const metadata = await decryptPrivateMetadata<Record<string, string>>(
+            record.encryptedMetadata,
+            key,
+          ).catch(() => ({}) as Record<string, string>);
+          return vaultRecordToReviewItem(record, metadata, index);
+        }),
+      );
+      setCompletedRecords(decrypted);
+      setCompletedStatus("loaded");
+    } catch (error) {
+      console.warn("[paymemo] completed load failed", error);
+      setCompletedRecords([]);
+      setCompletedStatus("error");
+    }
+  }
+
+  useEffect(() => {
+    if (activeTab === "completed") void loadCompletedRecords();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+
+  const visibleRecords = activeTab === "pending" ? extensionRecords : completedRecords;
 
   const walletBuckets = useMemo(() => {
     const main = ownerWallet ? ownerWallet.toLowerCase() : "";
@@ -75,7 +132,7 @@ function ReviewQueue() {
       buckets.set(key, { key, label, address, tone, records: [record] });
     }
 
-    for (const record of extensionRecords) {
+    for (const record of visibleRecords) {
       const from = (record.raw.from ?? "").toLowerCase();
       const to = (record.raw.to ?? "").toLowerCase();
       const matchesMain = main && (from === main || to === main);
@@ -107,7 +164,7 @@ function ReviewQueue() {
       return order[a.tone] - order[b.tone];
     });
     return ordered;
-  }, [extensionRecords, ownerWallet, partnerWallets]);
+  }, [visibleRecords, ownerWallet, partnerWallets]);
 
   // Collapse state per wallet bucket. Default: main + partners expanded,
   // unattributed collapsed.
@@ -130,15 +187,15 @@ function ReviewQueue() {
   });
   const [actionMessage, setActionMessage] = useState("");
   const [activeId, setActiveId] = useState<string>("");
-  const active = extensionRecords.find((item) => item.id === activeId) ?? extensionRecords[0];
+  const active = visibleRecords.find((item) => item.id === activeId) ?? visibleRecords[0];
 
   useEffect(() => {
     setActiveId((current) =>
-      current && extensionRecords.some((record) => record.id === current)
+      current && visibleRecords.some((record) => record.id === current)
         ? current
-        : (extensionRecords[0]?.id ?? ""),
+        : (visibleRecords[0]?.id ?? ""),
     );
-  }, [extensionRecords]);
+  }, [visibleRecords]);
 
   async function loadExtensionRecords() {
     await extensionQuery.refetch();
@@ -154,6 +211,61 @@ function ReviewQueue() {
     });
     setActionMessage("");
   }, [active?.id]);
+
+  async function updateCompletedActive() {
+    if (!active || !active.vault) {
+      setActionMessage("This record is not editable.");
+      return;
+    }
+    setActionMessage("Re-encrypting and saving…");
+
+    const session = readVaultSession();
+    const key = session ? await getRememberedVaultKey() : null;
+    if (!session?.walletAddress || !key) {
+      setActionMessage("Unlock your vault on the dashboard first.");
+      notify.error("Vault locked", "Connect your wallet to edit memos.");
+      return;
+    }
+
+    try {
+      const category = (payMemoCategories as readonly string[]).includes(draft.category)
+        ? (draft.category as PayMemoRecordInput["category"])
+        : ("Other" as PayMemoRecordInput["category"]);
+      const existingMetadata = await decryptPrivateMetadata<Record<string, string>>(
+        active.vault.encryptedMetadata,
+        key,
+      ).catch(() => ({}) as Record<string, string>);
+
+      const merged = {
+        ...existingMetadata,
+        category,
+        counterparty: draft.counterparty,
+        note: draft.note,
+        project: draft.project,
+      };
+      const newEncrypted = await encryptPrivateMetadata(merged, key, session.walletAddress);
+      const updated: StoredVaultRecord = {
+        ...active.vault,
+        encryptedMetadata: newEncrypted,
+        syncStatus: "local",
+        updatedAt: new Date().toISOString(),
+      };
+      saveEncryptedVaultRecord(updated);
+      try {
+        await syncEncryptedVaultRecord({ ...updated, syncStatus: "synced" });
+        saveEncryptedVaultRecord({ ...updated, syncStatus: "synced" });
+      } catch {
+        saveEncryptedVaultRecord({ ...updated, syncStatus: "sync-failed" });
+      }
+      await loadCompletedRecords();
+      setActionMessage("Memo updated in your encrypted Ledger.");
+      notify.success("Memo updated", "Your Ledger entry was re-encrypted and saved.");
+    } catch (error) {
+      const text = error instanceof Error ? error.message : "Update failed.";
+      setActionMessage(text);
+      notify.error("Update failed", text);
+    }
+  }
 
   async function confirmActive() {
     if (!active) return;
@@ -256,21 +368,60 @@ function ReviewQueue() {
         title="Review Queue"
         subtitle="Confirm unclear transaction meaning before it enters the vault."
       />
-      <div className="grid gap-6 p-6 pb-28 lg:grid-cols-[minmax(0,1fr)_440px] lg:p-10">
+      <div className="grid gap-6 overflow-x-hidden p-6 pb-28 lg:grid-cols-[minmax(0,1fr)_440px] lg:p-10">
         <section className="overflow-hidden rounded-3xl border border-ink/35 bg-white shadow-soft">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-ink/25 px-5 py-4">
             <div>
-              <div className="text-sm font-semibold">Payments to review</div>
+              <div className="text-sm font-semibold">
+                {activeTab === "pending" ? "Payments to review" : "Completed transactions"}
+              </div>
               <div className="text-xs text-ink/72">
-                Click a transaction, add context, then record it.
+                {activeTab === "pending"
+                  ? "Click a transaction, add context, then record it."
+                  : "Edit the memo on any past transaction — they're already in your encrypted Ledger."}
               </div>
             </div>
             <button
-              onClick={() => void loadExtensionRecords()}
+              onClick={() =>
+                activeTab === "pending" ? void loadExtensionRecords() : void loadCompletedRecords()
+              }
               className="inline-flex items-center gap-2 rounded-xl border border-ink/25 px-3 py-2 text-xs font-semibold"
             >
               <RefreshCw className="h-3.5 w-3.5" /> Refresh
             </button>
+          </div>
+
+          {/* Pending / Completed tab pills */}
+          <div className="flex items-center gap-2 border-b border-ink/15 px-5 py-3">
+            {(["pending", "completed"] as const).map((tab) => {
+              const isActive = activeTab === tab;
+              const count = tab === "pending" ? extensionRecords.length : completedRecords.length;
+              return (
+                <button
+                  key={tab}
+                  onClick={() => {
+                    setActiveTab(tab);
+                    setActiveId("");
+                  }}
+                  className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold transition-colors ${
+                    isActive
+                      ? tab === "pending"
+                        ? "bg-papaya/30 text-ink"
+                        : "bg-mint/25 text-ink"
+                      : "border border-ink/15 bg-white text-ink/72 hover:bg-cream/60"
+                  }`}
+                >
+                  <span className="capitalize">{tab}</span>
+                  <span
+                    className={`rounded-full px-1.5 text-[10px] ${
+                      isActive ? "bg-ink/15 text-ink" : "bg-ink/8 text-ink/68"
+                    }`}
+                  >
+                    {count}
+                  </span>
+                </button>
+              );
+            })}
           </div>
           <div className="divide-y divide-ink/15">
             {walletBuckets.map((bucket) => {
@@ -350,7 +501,7 @@ function ReviewQueue() {
               );
             })}
           </div>
-          {extensionRecords.length === 0 && (
+          {visibleRecords.length === 0 && activeTab === "pending" && (
             <div className="rounded-3xl border border-ink/35 bg-white p-8 text-center text-sm text-ink/75 shadow-soft">
               No review items yet. Two ways to get one:{" "}
               <a href="/install" className="font-semibold text-ink underline underline-offset-2">
@@ -363,15 +514,26 @@ function ReviewQueue() {
               and enable <em>Browser chain watch</em> to scan Morph Hoodi from this tab.
             </div>
           )}
+          {visibleRecords.length === 0 && activeTab === "completed" && (
+            <div className="rounded-3xl border border-ink/35 bg-white p-8 text-center text-sm text-ink/75 shadow-soft">
+              {completedStatus === "loading"
+                ? "Loading completed transactions…"
+                : completedStatus === "locked"
+                  ? "Unlock your vault on the dashboard to view completed transactions."
+                  : "No completed transactions yet. Pay from /app/send or confirm a pending review to populate this tab."}
+            </div>
+          )}
         </section>
 
-        <aside className="rounded-3xl border border-ink/35 bg-white p-6 shadow-card">
+        <aside className="min-w-0 overflow-hidden rounded-3xl border border-ink/35 bg-white p-6 shadow-card">
           {active ? (
             <>
               <div className="text-[10px] font-bold uppercase tracking-widest text-mint">
                 Review selected payment
               </div>
-              <h2 className="mt-2 text-xl font-semibold">{active.publicFact}</h2>
+              <h2 className="mt-2 break-all text-xl font-semibold leading-snug">
+                {active.publicFact}
+              </h2>
               <div className="mt-4 space-y-3 text-sm">
                 <ReviewRow label="Detected" value={active.localDateTime} />
                 <ReviewRow label="From" value={active.raw.from ?? "unknown"} mono />
@@ -437,10 +599,11 @@ function ReviewQueue() {
               </label>
 
               <button
-                onClick={confirmActive}
+                onClick={activeTab === "completed" ? updateCompletedActive : confirmActive}
                 className="mt-5 inline-flex w-full items-center justify-center gap-2 rounded-2xl bg-ink py-3 text-sm font-semibold text-cream"
               >
-                <Check className="h-4 w-4" /> Record review
+                <Check className="h-4 w-4" />
+                {activeTab === "completed" ? "Update memo" : "Record review"}
               </button>
               {actionMessage && (
                 <p className="mt-3 text-xs leading-5 text-ink/75">{actionMessage}</p>
@@ -487,7 +650,45 @@ function toReviewItem(record: SyncedRecord, index: number): ReviewItem {
     status: record.status,
     localDateTime: formatLocalDateTime(record.confirmedAt ?? record.updatedAt ?? record.createdAt),
     raw: record,
+    vault: undefined,
   };
+}
+
+/**
+ * Adapt a (possibly decrypted) `StoredVaultRecord` into the same
+ * `ReviewItem` shape the list expects. When `metadata` is empty the
+ * record stays "locked" — fields render as encrypted but the row still
+ * shows in the Completed tab so the user knows it exists.
+ */
+function vaultRecordToReviewItem(
+  record: StoredVaultRecord,
+  metadata: Record<string, string>,
+  index: number,
+): ReviewItem {
+  const fakeSynced: SyncedRecord = {
+    id: record.id,
+    chainId: record.publicRecord.chainId,
+    chainName: record.publicRecord.chainName,
+    source: record.publicRecord.source ?? "vault",
+    provider: record.publicRecord.source ?? "PayMemo Vault",
+    txHash: record.publicRecord.txHash,
+    from: record.publicRecord.from,
+    to: record.publicRecord.to,
+    amount: record.publicRecord.amount,
+    token: record.publicRecord.token,
+    category: metadata.category ?? "Other",
+    counterparty: metadata.counterparty ?? "",
+    note: metadata.note ?? "",
+    project: metadata.project ?? "",
+    method: "vault",
+    status: record.publicRecord.status,
+    createdAt: record.publicRecord.createdAt,
+    updatedAt: record.updatedAt,
+    confirmedAt: record.publicRecord.confirmedAt,
+  };
+  const item = toReviewItem(fakeSynced, index);
+  item.vault = record;
+  return item;
 }
 
 type ReviewItem = {
@@ -502,6 +703,9 @@ type ReviewItem = {
   status: string;
   localDateTime: string;
   raw: SyncedRecord;
+  /** If this item came from the Completed tab, the underlying vault row
+   *  so we can re-encrypt + PATCH on save. */
+  vault?: StoredVaultRecord;
 };
 
 type SyncedRecord = {
