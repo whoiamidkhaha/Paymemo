@@ -13,6 +13,9 @@ import {
   syncEncryptedVaultRecord,
   type StoredVaultRecord,
 } from "@/lib/paymemo-vault";
+import { mirrorOrphanedExtensionRecords } from "@/lib/paymemo-mirror";
+import type { ExtensionRecord } from "@/lib/extension-records";
+import { readPartnerWallets } from "@/lib/watched-wallets";
 import { Pencil, Search, Calendar, Filter, Download } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
@@ -253,9 +256,65 @@ function Ledger() {
     // Server is the only source of truth for vault records. No
     // sessionStorage fallback - if the server fetch fails we show an
     // empty ledger and the error surfaces in the status banner.
-    const records = session
+    let records = session
       ? await fetchEncryptedVaultRecords(session.walletAddress).catch(() => [])
       : [];
+
+    // Backfill any confirmed extension_record into the vault.
+    //
+    // Records saved via the browser extension popup / sidepanel land in
+    // `extension_records` only - the extension can't write to vault_records
+    // because it doesn't hold the dApp's vault encryption key. So they
+    // never reach the ledger on their own.
+    //
+    // Here, with the vault unlocked, we mirror any confirmed extension
+    // record whose txHash isn't already in the vault. The result is that
+    // opening /app/ledger after saving a memo from the extension auto-
+    // backfills it into the ledger.
+    if (session && key) {
+      try {
+        const ownedWallets = new Set<string>([session.walletAddress.toLowerCase()]);
+        readPartnerWallets(session.walletAddress).forEach((wallet) =>
+          ownedWallets.add(wallet.address),
+        );
+
+        const params = new URLSearchParams();
+        ownedWallets.forEach((wallet) => params.append("wallet", wallet));
+
+        const extensionResponse = await fetch(`/api/extension-intent?${params.toString()}`).catch(
+          () => null,
+        );
+        if (extensionResponse?.ok) {
+          const payload = (await extensionResponse.json().catch(() => null)) as {
+            records?: ExtensionRecord[];
+          } | null;
+          const extensionRecords = payload?.records ?? [];
+
+          const existingVaultTxHashes = new Set<string>();
+          for (const record of records) {
+            const tx = (record.publicRecord as { txHash?: string } | null)?.txHash;
+            if (tx) existingVaultTxHashes.add(tx.toLowerCase());
+          }
+
+          const mirrored = await mirrorOrphanedExtensionRecords({
+            extensionRecords,
+            existingVaultTxHashes,
+            session,
+            key,
+          });
+
+          // If we backfilled anything, re-fetch so the new rows appear
+          // with their freshly-stored encryptedMetadata + canonical ids.
+          if (mirrored.length > 0) {
+            records = await fetchEncryptedVaultRecords(session.walletAddress).catch(
+              () => records,
+            );
+          }
+        }
+      } catch (error) {
+        console.warn("[paymemo] ledger extension-mirror failed", error);
+      }
+    }
 
 
     if (!key) {

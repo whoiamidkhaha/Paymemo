@@ -18,6 +18,7 @@ import {
   toPublicRecord,
   type StoredVaultRecord,
 } from "@/lib/paymemo-vault";
+import { mirrorOrphanedExtensionRecords } from "@/lib/paymemo-mirror";
 import { normalizeRecord, payMemoCategories, type PayMemoRecordInput } from "@/lib/paymemo-schema";
 import { morphHoodi } from "@/lib/morph";
 import { readPartnerWallets, type PartnerWallet } from "@/lib/watched-wallets";
@@ -130,9 +131,33 @@ function ReviewQueue() {
     try {
       const key = await getRememberedVaultKey();
       // Server-only — no sessionStorage fallback.
-      const records = await fetchEncryptedVaultRecords(session.walletAddress).catch(
+      let records = await fetchEncryptedVaultRecords(session.walletAddress).catch(
         () => [],
       );
+
+      // Backfill any confirmed extension_record into the vault, same as
+      // /app/ledger does. The extension popup save can't write to
+      // vault_records directly (no vault key), so without this mirror
+      // those memos would never appear in the Ledger view. Idempotent -
+      // anything already in vault by txHash is skipped.
+      if (key && extensionQuery.data && extensionQuery.data.length > 0) {
+        const existingVaultTxHashes = new Set<string>();
+        for (const record of records) {
+          const tx = (record.publicRecord as { txHash?: string } | null)?.txHash;
+          if (tx) existingVaultTxHashes.add(tx.toLowerCase());
+        }
+        const mirrored = await mirrorOrphanedExtensionRecords({
+          extensionRecords: extensionQuery.data,
+          existingVaultTxHashes,
+          session,
+          key,
+        });
+        if (mirrored.length > 0) {
+          records = await fetchEncryptedVaultRecords(session.walletAddress).catch(
+            () => records,
+          );
+        }
+      }
 
       // Build the dedupe set from EVERY vault row regardless of status so
       // an in-flight /app/send broadcast (pending_signature / pending_chain)
