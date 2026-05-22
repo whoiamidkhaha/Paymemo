@@ -10,7 +10,6 @@ import {
 } from "@/lib/crypto-vault";
 import {
   fetchEncryptedVaultRecords,
-  readEncryptedVaultRecords,
   type StoredVaultRecord,
 } from "@/lib/paymemo-vault";
 import { morphTokens } from "@/lib/morph";
@@ -85,7 +84,7 @@ function Dashboard() {
       const key = session ? await getRememberedVaultKey() : null;
       const wallet = session?.walletAddress ?? "";
       const records = wallet
-        ? await fetchEncryptedVaultRecords(wallet).catch(() => readEncryptedVaultRecords())
+        ? await fetchEncryptedVaultRecords(wallet).catch(() => [])
         : [];
 
       if (!wallet || !key) {

@@ -13,8 +13,6 @@ import {
 } from "@/lib/crypto-vault";
 import {
   fetchEncryptedVaultRecords,
-  readEncryptedVaultRecords,
-  saveEncryptedVaultRecord,
   syncEncryptedVaultRecord,
   toPrivateMetadata,
   toPublicRecord,
@@ -31,14 +29,47 @@ export const Route = createFileRoute("/app/review")({
 
 function ReviewQueue() {
   const extensionQuery = useExtensionRecords();
+
+  const [activeTab, setActiveTab] = useState<"pending" | "completed">("pending");
+  const [ownerWallet, setOwnerWallet] = useState<string>("");
+  const [partnerWallets, setPartnerWallets] = useState<PartnerWallet[]>([]);
+  const [completedRecords, setCompletedRecords] = useState<ReviewItem[]>([]);
+  const [completedStatus, setCompletedStatus] = useState<
+    "idle" | "loading" | "loaded" | "locked" | "error"
+  >("idle");
+
+  // Set of tx hashes that already have a confirmed counterpart somewhere -
+  // either in vault_records (dApp /app/send) or in extension_records itself
+  // marked confirmed (extension popup save). The Pending list filters
+  // against this set so a tx the user has already explained never shows up
+  // demanding a second review.
+  const completedTxHashes = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of completedRecords) {
+      const hash = (r.hash || "").toLowerCase();
+      if (hash && hash !== "pending") set.add(hash);
+    }
+    for (const r of extensionQuery.data ?? []) {
+      if (r.status === "confirmed" && r.txHash) {
+        set.add(r.txHash.toLowerCase());
+      }
+    }
+    return set;
+  }, [completedRecords, extensionQuery.data]);
+
   // Pending = records that landed via chain-watch / extension and still
-  // need a memo. Anything `needs-review` or earlier-state belongs here.
+  // need a memo. Anything `needs-review` or earlier-state belongs here -
+  // unless its tx hash already has a confirmed twin elsewhere.
   const extensionRecords = useMemo<ReviewItem[]>(
     () =>
       (extensionQuery.data ?? [])
         .filter((record) => record.status !== "confirmed")
+        .filter((record) => {
+          const hash = (record.txHash || "").toLowerCase();
+          return !hash || !completedTxHashes.has(hash);
+        })
         .map((record, index) => toReviewItem(record, index)),
-    [extensionQuery.data],
+    [extensionQuery.data, completedTxHashes],
   );
   // Extension memos the user has already filled in. These come through
   // `/api/extension-intent` with status="confirmed" - they're the records
@@ -52,14 +83,6 @@ function ReviewQueue() {
         .map((record, index) => toReviewItem(record, index)),
     [extensionQuery.data],
   );
-
-  const [activeTab, setActiveTab] = useState<"pending" | "completed">("pending");
-  const [ownerWallet, setOwnerWallet] = useState<string>("");
-  const [partnerWallets, setPartnerWallets] = useState<PartnerWallet[]>([]);
-  const [completedRecords, setCompletedRecords] = useState<ReviewItem[]>([]);
-  const [completedStatus, setCompletedStatus] = useState<
-    "idle" | "loading" | "loaded" | "locked" | "error"
-  >("idle");
 
   useEffect(() => {
     const session = readVaultSession();
@@ -78,8 +101,9 @@ function ReviewQueue() {
     setCompletedStatus("loading");
     try {
       const key = await getRememberedVaultKey();
-      const records = await fetchEncryptedVaultRecords(session.walletAddress).catch(() =>
-        readEncryptedVaultRecords(),
+      // Server-only — no sessionStorage fallback.
+      const records = await fetchEncryptedVaultRecords(session.walletAddress).catch(
+        () => [],
       );
       const onlyConfirmed = records.filter((record) => record.publicRecord.status === "confirmed");
 
@@ -110,10 +134,13 @@ function ReviewQueue() {
     }
   }
 
+  // Load vault records on mount AND whenever extension records change, so
+  // the cross-table dedupe below can drop any extension-side placeholders
+  // whose tx hash already has a confirmed vault row.
   useEffect(() => {
-    if (activeTab === "completed") void loadCompletedRecords();
+    void loadCompletedRecords();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTab]);
+  }, [extensionQuery.dataUpdatedAt]);
 
   // Completed view = vault (encrypted, edit-on-the-fly) UNION extension-saved
   // confirmed records (plaintext, came from the popup/sidepanel). De-dupe
@@ -284,15 +311,17 @@ function ReviewQueue() {
       const updated: StoredVaultRecord = {
         ...active.vault,
         encryptedMetadata: newEncrypted,
-        syncStatus: "local",
+        syncStatus: "synced",
         updatedAt: new Date().toISOString(),
       };
-      saveEncryptedVaultRecord(updated);
       try {
-        await syncEncryptedVaultRecord({ ...updated, syncStatus: "synced" });
-        saveEncryptedVaultRecord({ ...updated, syncStatus: "synced" });
-      } catch {
-        saveEncryptedVaultRecord({ ...updated, syncStatus: "sync-failed" });
+        await syncEncryptedVaultRecord(updated);
+      } catch (error) {
+        const text =
+          error instanceof Error ? error.message : "Could not save the update to the database.";
+        setActionMessage(text);
+        notify.error("Update failed", text);
+        return;
       }
       await loadCompletedRecords();
       setActionMessage("Memo updated in your encrypted Ledger.");
@@ -368,7 +397,7 @@ function ReviewQueue() {
     // confirmed entry. Without this, the row only ever lives in
     // `extension_records` and never reaches the ledger view.
     const session = readVaultSession();
-    let ledgerSynced: "synced" | "local-only" | "skipped" = "skipped";
+    let ledgerSynced: "synced" | "skipped" = "skipped";
     if (session?.walletAddress) {
       try {
         const key = await getRememberedVaultKey();
@@ -397,17 +426,14 @@ function ReviewQueue() {
             walletAddress: session.walletAddress,
             publicRecord: toPublicRecord(normalized),
             encryptedMetadata,
-            syncStatus: "local",
+            syncStatus: "synced",
             updatedAt: reviewedAt,
           };
-          saveEncryptedVaultRecord(stored);
-          ledgerSynced = "local-only";
           try {
-            await syncEncryptedVaultRecord({ ...stored, syncStatus: "synced" });
-            saveEncryptedVaultRecord({ ...stored, syncStatus: "synced" });
+            await syncEncryptedVaultRecord(stored);
             ledgerSynced = "synced";
           } catch {
-            saveEncryptedVaultRecord({ ...stored, syncStatus: "sync-failed" });
+            ledgerSynced = "skipped";
           }
         }
       } catch (error) {
@@ -419,9 +445,7 @@ function ReviewQueue() {
     setActionMessage(
       ledgerSynced === "synced"
         ? "Recorded. Saved to your encrypted Ledger as confirmed."
-        : ledgerSynced === "local-only"
-          ? "Recorded locally. Sync to your Ledger failed - try again from /app/ledger."
-          : "Recorded. Unlock your vault on the dashboard to also save this to the Ledger.",
+        : "Recorded in the review queue. Unlock your vault on the dashboard so the next save also lands in the Ledger.",
     );
     notify.success(
       "Review recorded",

@@ -249,6 +249,11 @@ export async function upsertVaultRecord(record: StoredVaultRecord) {
     updatedAt: new Date().toISOString(),
   };
 
+  const confirmedTxHash =
+    syncedRecord.publicRecord.status === "confirmed"
+      ? String(syncedRecord.publicRecord.txHash || "").toLowerCase()
+      : "";
+
   if (isSupabaseEnabled()) {
     const existingRows = await supabaseRequest<VaultRecordRow[]>(
       `vault_records?id=eq.${encodeURIComponent(syncedRecord.id)}&select=wallet_address&limit=1`,
@@ -262,6 +267,19 @@ export async function upsertVaultRecord(record: StoredVaultRecord) {
       body: JSON.stringify(toVaultRow(syncedRecord)),
       prefer: "resolution=merge-duplicates,return=representation",
     });
+
+    // Once the dApp writes a confirmed vault record for a given txHash,
+    // any extension_records placeholder for the same tx is no longer
+    // useful — it would just sit in /app/review's Pending tab demanding
+    // a memo the user has already filled in. Best-effort delete any
+    // matching extension rows; failure here doesn't block the upsert.
+    if (confirmedTxHash) {
+      await supabaseRequest<unknown>(
+        `extension_records?record->>txHash=eq.${encodeURIComponent(confirmedTxHash)}`,
+        { method: "DELETE" },
+      ).catch(() => null);
+    }
+
     return toStoredVaultRecord(rows[0]);
   }
 
@@ -273,15 +291,26 @@ export async function upsertVaultRecord(record: StoredVaultRecord) {
     throw new Error("Vault record id is owned by a different wallet.");
   }
 
-  await writePayMemoDb((db) => ({
-    ...db,
-    vaultRecords: [
+  await writePayMemoDb((db) => {
+    const nextVault = [
       syncedRecord,
       ...db.vaultRecords.filter(
         (item) => item.id !== syncedRecord.id || item.walletAddress.toLowerCase() !== walletKey,
       ),
-    ].slice(0, 2000),
-  }));
+    ].slice(0, 2000);
+
+    const nextExtension = confirmedTxHash
+      ? db.extensionRecords.filter(
+          (item) => String(item.txHash || "").toLowerCase() !== confirmedTxHash,
+        )
+      : db.extensionRecords;
+
+    return {
+      ...db,
+      vaultRecords: nextVault,
+      extensionRecords: nextExtension,
+    };
+  });
 
   return syncedRecord;
 }

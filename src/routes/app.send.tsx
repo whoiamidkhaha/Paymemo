@@ -22,10 +22,10 @@ import {
   signVaultUnlock,
 } from "@/lib/crypto-vault";
 import {
-  saveEncryptedVaultRecord,
   syncEncryptedVaultRecord,
   toPrivateMetadata,
   toPublicRecord,
+  type StoredVaultRecord,
 } from "@/lib/paymemo-vault";
 import { createRecordId, normalizeRecord } from "@/lib/paymemo-schema";
 import {
@@ -246,20 +246,25 @@ function Send() {
       account,
     );
 
-    const stored = saveEncryptedVaultRecord({
+    // Server-only persistence. No sessionStorage write.
+    const stored: StoredVaultRecord = {
       id: normalized.id ?? "",
       walletAddress: account,
       publicRecord: toPublicRecord(normalized),
       encryptedMetadata,
-      syncStatus: "local",
+      syncStatus: "synced",
       updatedAt: new Date().toISOString(),
-    });
+    };
 
     try {
-      const synced = await syncEncryptedVaultRecord(stored);
-      saveEncryptedVaultRecord({ ...synced.record, syncStatus: "synced" });
-    } catch {
-      saveEncryptedVaultRecord({ ...stored, syncStatus: "sync-failed" });
+      await syncEncryptedVaultRecord(stored);
+    } catch (error) {
+      console.warn("[paymemo] vault sync failed", error);
+      // Re-throw so the caller's flow shows the user a real error instead
+      // of silently pretending the write happened.
+      throw error instanceof Error
+        ? error
+        : new Error("Unable to save encrypted record to the database.");
     }
 
     return normalized;

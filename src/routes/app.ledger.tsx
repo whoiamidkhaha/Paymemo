@@ -10,8 +10,6 @@ import {
 } from "@/lib/crypto-vault";
 import {
   fetchEncryptedVaultRecords,
-  readEncryptedVaultRecords,
-  saveEncryptedVaultRecord,
   syncEncryptedVaultRecord,
   type StoredVaultRecord,
 } from "@/lib/paymemo-vault";
@@ -251,11 +249,14 @@ function Ledger() {
   async function loadVaultRows() {
     const key = await getRememberedVaultKey();
     const session = readVaultSession();
+
+    // Server is the only source of truth for vault records. No
+    // sessionStorage fallback - if the server fetch fails we show an
+    // empty ledger and the error surfaces in the status banner.
     const records = session
-      ? await fetchEncryptedVaultRecords(session.walletAddress).catch(() =>
-          readEncryptedVaultRecords(),
-        )
-      : readEncryptedVaultRecords();
+      ? await fetchEncryptedVaultRecords(session.walletAddress).catch(() => [])
+      : [];
+
 
     if (!key) {
       const lockedRows: LedgerRow[] = records.map((record) => ({
@@ -346,16 +347,20 @@ function Ledger() {
     const updated: StoredVaultRecord = {
       ...target.raw,
       encryptedMetadata,
-      syncStatus: "local",
+      syncStatus: "synced",
       updatedAt: new Date().toISOString(),
     };
 
-    saveEncryptedVaultRecord(updated);
+    // Server-only persistence. No sessionStorage write. If the sync fails
+    // we surface the error so the user can retry instead of silently
+    // ending up with a record that only lives in the tab.
     try {
-      const synced = await syncEncryptedVaultRecord(updated);
-      saveEncryptedVaultRecord({ ...synced.record, syncStatus: "synced" });
-    } catch {
-      saveEncryptedVaultRecord({ ...updated, syncStatus: "sync-failed" });
+      await syncEncryptedVaultRecord(updated);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Could not save the update to the database.";
+      setSaveStatus(message);
+      throw error;
     }
 
     setSaveStatus("Saved. Encrypted update synced to the database.");
