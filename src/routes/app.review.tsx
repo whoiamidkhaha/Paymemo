@@ -576,7 +576,8 @@ function ReviewQueue() {
               <a href="/app" className="font-semibold text-ink underline underline-offset-2">
                 dashboard
               </a>{" "}
-              and enable <em>Browser chain watch</em> to scan Morph Hoodi from this tab.
+              and add a wallet — PayMemo's server scanner will catch anything that
+              lands on Morph Hoodi and surface it here.
             </div>
           )}
           {visibleRecords.length === 0 && activeTab === "completed" && (

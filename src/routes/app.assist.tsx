@@ -45,14 +45,16 @@ function WalletAssist() {
           </Link>
           <div className="rounded-3xl border border-ink/35 bg-white p-5 shadow-soft">
             <div className="flex items-center gap-2 text-sm font-semibold">
-              <RadioTower className="h-4 w-4 text-mint" /> Or watch from this tab
+              <RadioTower className="h-4 w-4 text-mint" /> Or skip the extension entirely
             </div>
             <p className="mt-2 text-sm leading-6 text-ink/78">
-              No extension? Toggle{" "}
-              <Link to="/app" className="underline underline-offset-2 hover:text-ink">
-                Browser chain watch
+              PayMemo's server scanner sweeps Morph for your watched wallets every
+              few seconds via a background worker. Offline-detected transactions
+              wait for you in{" "}
+              <Link to="/app/review" className="underline underline-offset-2 hover:text-ink">
+                Needs Review
               </Link>{" "}
-              on the dashboard — same Morph detection, runs while this tab is open.
+              with no tab needed.
             </p>
           </div>
           <div className="rounded-3xl border border-ink/35 bg-white p-5 shadow-soft">

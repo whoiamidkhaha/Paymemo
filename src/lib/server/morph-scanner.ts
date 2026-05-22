@@ -1,12 +1,16 @@
 /**
- * Server-side Morph Hoodi scanner. Mirrors `src/lib/browser-chain-watch.ts`
- * but writes directly to `extension_records` (the same table the dApp's
- * review queue reads) via `paymemo-db`.
+ * Server-side Morph Hoodi scanner. Writes detected transactions directly
+ * to `extension_records` (the same table the dApp's review queue reads)
+ * via `paymemo-db`.
  *
  * Used by:
  *   - `GET /api/cron/scan-morph` (Vercel cron, periodic background sweep)
  *   - `POST /api/cron/scan-morph` with `?ownerWallet=` (per-user catch-up
  *     scan triggered when the dashboard mounts after the user comes back online)
+ *   - The Railway worker (`worker/index.js`), which calls the GET endpoint
+ *     on every new Morph block for ~2-second push detection
+ *
+ * The dApp no longer runs an in-tab poller — all scanning is server-side.
  */
 
 import {

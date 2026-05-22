@@ -2,7 +2,6 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { Topbar } from "@/components/app/Topbar";
 import { StatusBadge } from "@/components/app/StatusBadge";
 import { WalletConnectModal } from "@/components/app/WalletConnectModal";
-import { BrowserChainWatchCard } from "@/components/app/BrowserChainWatchCard";
 import {
   decryptPrivateMetadata,
   getRememberedVaultKey,
@@ -414,18 +413,6 @@ function Dashboard() {
             )}
           </div>
         </div>
-
-        <BrowserChainWatchCard
-          ownerAddress={walletAddress || readVaultSession()?.walletAddress}
-          watchedAddresses={[
-            ...(walletAddress ? [walletAddress] : []),
-            ...partnerWallets.map((wallet) => wallet.address),
-          ]}
-          labels={{
-            ...(walletAddress ? { [walletAddress.toLowerCase()]: "My wallet" } : {}),
-            ...Object.fromEntries(partnerWallets.map((wallet) => [wallet.address, wallet.label])),
-          }}
-        />
 
         <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
           {cards.map((c, i) => (
