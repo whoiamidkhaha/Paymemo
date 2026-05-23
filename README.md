@@ -38,25 +38,133 @@ Detection happens server-side in real time so transactions you receive while off
 ## Architecture
 
 ```
-USER                Browser (Chrome/Brave/Edge/Arc) + PayMemo MV3 extension
-                                  │
-CLIENT              TanStack Start React 19 SSR
-                    AES-GCM encryption (key = SHA-256 of wallet signature)
-                                  │
-VERCEL              Build Output API v3 + Node 22 SSR function
-                    /api/vault-records, /api/extension-intent,
-                    /api/watched-wallets, /api/cron/scan-morph, /api/agent-memory
-                    Daily Vercel cron (Hobby plan safety net)
-                                  │
-SUPABASE            vault_records (encrypted memos)
-                    extension_records (chain-watch + extension captures)
-                    watched_wallets, extension_pairings, agent_memory_records
-                                  │
-                                  ├──────────────────┐
-RAILWAY                                               MORPH HOODI L2
-worker/index.js: polls Morph every 2s,                Chain ID 2910
-triggers /api/cron/scan-morph on every block.         rpc-hoodi.morph.network
-                                                      Native ETH + L2USDC + WETH
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ USER LAYER                                                                   │
+│                                                                              │
+│   Wallet apps (MetaMask · Rabby · Bitget · Trust · Phantom · OKX ·           │
+│   Coinbase · Binance) — discovered via EIP-6963, no walletconnect.           │
+│                                                                              │
+│   Browser (Chrome / Brave / Edge / Arc) hosts:                               │
+│     • paymemo.vercel.app dApp tab                                            │
+│     • PayMemo MV3 extension (popup + sidepanel + content script + bg SW)     │
+└──────────────────────────────────────────────────────────────────────────────┘
+                │                                          │
+                │ EIP-1193 signTransaction                 │ tx events from
+                │ personal_sign (auth)                     │ window.ethereum
+                ▼                                          ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ CLIENT LAYER  (runs in user's browser, zero-trust w.r.t. server)             │
+│                                                                              │
+│   TanStack Start  ─►  React 19 SSR + file-based routes (src/routes/*.tsx)    │
+│   viem            ─►  Morph chain client, ETH + ERC-20 reads/writes          │
+│   Web Crypto API  ─►  AES-GCM encrypt memo BEFORE leaving the browser        │
+│                       Key = SHA-256( wallet personal_sign("PayMemo v1") )    │
+│                                                                              │
+│   Extension MV3:                                                             │
+│     popup.js / sidepanel.js  ─►  capture form, watched wallet manager        │
+│     background.js (SW)       ─►  polls /api/extension-intent for new tx      │
+│     content.js + inpage.js   ─►  in-page memo overlay after signing          │
+└──────────────────────────────────────────────────────────────────────────────┘
+       │                              │                              │
+       │ HTTPS                        │ HTTPS (CORS: chrome-ext://)  │ JSON-RPC
+       │ x-paymemo-wallet             │ x-paymemo-install-token      │
+       │ x-paymemo-signature          │                              │
+       ▼                              ▼                              │
+┌──────────────────────────────────────────────────────────────────┐ │
+│ EDGE LAYER — Vercel  (Build Output API v3, Node 22 serverless)   │ │
+│                                                                  │ │
+│   _render.func/index.mjs   ─►  esbuild-bundled SSR + API entry   │ │
+│                                                                  │ │
+│   API routes (src/routes/api.*.ts):                              │ │
+│     /api/vault-records         encrypted memo CRUD (dApp)        │ │
+│     /api/extension-intent      extension capture sync (CORS)     │ │
+│     /api/extension-pair        install-token ↔ wallet pairing    │ │
+│     /api/watched-wallets       per-user scan list                │ │
+│     /api/cron/scan-morph       sweep Morph for watched wallets   │ │
+│     /api/agent-memory          AI-agent payment intents          │ │
+│     /api/agent-payment-intent  encrypted agent intents (domain)  │ │
+│     /api/batch-payouts         encrypted batch payout records    │ │
+│     /api/invoices              encrypted invoice records         │ │
+│     /api/public-invoice        public read-only /pay/$id page    │ │
+│     /api/database-reset        wallet-auth wipe                  │ │
+│     /api/health                DB + RPC + cron diagnostics       │ │
+│                                                                  │ │
+│   Auth helpers (src/lib/server/wallet-auth.ts):                  │ │
+│     verify personal_sign  ·  validate install-token  ·  Zod      │ │
+│                                                                  │ │
+│   Vercel cron (vercel.json)  ─►  daily GET /api/cron/scan-morph  │ │
+│                                  (Hobby-plan safety net)         │ │
+└──────────────────────────────────────────────────────────────────┘ │
+       │                                    ▲                        │
+       │ Supabase REST                      │ Authorization:         │
+       │ service_role JWT                   │ Bearer $CRON_SECRET    │
+       ▼                                    │                        │
+┌──────────────────────────────────────┐    │                        │
+│ DATA LAYER — Supabase Postgres + RLS │    │                        │
+│                                      │    │                        │
+│   vault_records         (encrypted)  │    │                        │
+│   extension_records     (encrypted)  │    │                        │
+│   watched_wallets                    │    │                        │
+│   extension_pairings                 │    │                        │
+│   agent_memory_records  (encrypted)  │    │                        │
+│   paymemo_domain_records             │    │                        │
+│   users · counterparties · invoices  │    │                        │
+│   payment_intents · transactions     │    │                        │
+│   batch_payouts · batch_payout_items │    │                        │
+│   agent_payment_intents              │    │                        │
+│   linked_transactions                │    │                        │
+│                                      │    │                        │
+│   Every table: RLS enabled,          │    │                        │
+│   service_role policy only.          │    │                        │
+│   Local-dev fallback:                │    │                        │
+│   database/paymemo-dev-db.json       │    │                        │
+└──────────────────────────────────────┘    │                        │
+                                            │                        │
+┌──────────────────────────────────────┐    │                        │
+│ REAL-TIME LAYER — Railway worker     │────┘                        │
+│                                      │                             │
+│   worker/index.js (Node 20+)         │                             │
+│     loop:  eth_blockNumber every 2s  │                             │
+│     on new block ─► POST /api/cron/scan-morph                      │
+│                       with Bearer $CRON_SECRET                     │
+│   Fly.io / Render free tiers also supported.                       │
+└──────────────────────────────────────┘                             │
+       │                                                             │
+       │ JSON-RPC eth_blockNumber · eth_getLogs · eth_getBalance     │
+       ▼                                                             ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ CHAIN LAYER — Morph Hoodi L2                                                 │
+│                                                                              │
+│   Chain ID 2910                                                              │
+│   RPC       https://rpc-hoodi.morph.network                                  │
+│   Explorer  https://explorer-hoodi.morph.network                             │
+│                                                                              │
+│   Native ETH  ·  L2USDC (0x1178…a227)  ·  WETH (0x5300…0011)                 │
+│                                                                              │
+│   Deployed contract:                                                         │
+│     BatchPayout.sol  ─►  ETH + ERC-20 multi-recipient payout in one tx       │
+└──────────────────────────────────────────────────────────────────────────────┘
+
+Data flow at a glance:
+
+  Mode 1 — dApp send
+    User → React form → AES-GCM encrypt(memo) → viem.signTransaction →
+    Morph tx submitted → POST /api/vault-records (ciphertext + tx hash) →
+    Supabase vault_records → Ledger render on next fetch.
+
+  Mode 2 — Extension capture (real-time)
+    User signs tx in any wallet → Morph mines block N →
+    Railway worker sees block N (2s poll) → POST /api/cron/scan-morph →
+    morph-scanner.ts matches tx.from/to against watched_wallets →
+    insert pending extension_records row →
+    Extension background SW polls /api/extension-intent → popup opens →
+    user fills memo → AES-GCM encrypt → POST /api/extension-intent →
+    row updated to "completed" → appears in /app/review.
+
+  Agent payment intent
+    Agent script → POST /api/agent-memory (public, rate-limited) →
+    encrypted reason stored in agent_memory_records →
+    owner reviews + exports at /app/agents.
 ```
 
 See `public/architecture.html` for the full visual diagram — open it in any browser.
